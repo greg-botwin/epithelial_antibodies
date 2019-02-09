@@ -1,0 +1,375 @@
+---
+title: "Epithelial Proteins"
+author: "Translational Genomics Group"
+date: "2/7/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(knitr)
+library(UpSetR)
+```
+
+## GTEx Tissue 
+https://gtexportal.org/home/tissueSummaryPage# downloaded on 2/7/19
+
+```{r}
+gtex_samples <- read_csv("data/GTEx Portal.csv")
+
+gtex_samples %>%
+  filter(Tissue %in% c("Colon - Transverse", "Colon - Sigmoid",
+                       "Small Intestine - Terminal Ileum")) %>%
+  ggplot(aes(x = Tissue, y = `Number of RNASeq Samples`)) + 
+  geom_col() +
+  geom_text(aes(label = `Number of RNASeq Samples`, y = `Number of RNASeq Samples` + 0.05),
+    vjust = 0) +
+  theme_minimal() +
+  labs(title = "Number of GTEx RNASeq Samples by Tissue")
+```
+
+## Median TPM Per Tissue Per Gene
+
+### Get Data
+```{bash, eval = FALSE}
+wget -O data/GTEx_Analysis_2016-01-15_v7_RNASeQCv1.1.8_gene_median_tpm.gct.gz  https://storage.googleapis.com/gtex_analysis_v7/rna_seq_data/GTEx_Analysis_2016-01-15_v7_RNASeQCv1.1.8_gene_median_tpm.gct.gz
+
+gunzip data/GTEx_Analysis_2016-01-15_v7_RNASeQCv1.1.8_gene_median_tpm.gct.gz 
+```
+
+### Summarise
+```{r}
+gtex_tpm <- read_tsv("data/GTEx_Analysis_2016-01-15_v7_RNASeQCv1.1.8_gene_median_tpm.gct", 
+                       comment = "#", skip = 1)
+gtex_tpm_int <- gtex_tpm %>%
+  gather(key = "tissue", value = "TPM", -gene_id, - Description) %>%
+  filter(tissue %in% c("Colon - Transverse", "Colon - Sigmoid",
+                       "Small Intestine - Terminal Ileum")) %>%
+  mutate(Log2TPM = log2(TPM + 1))
+
+gtex_tpm_int %>%
+  group_by(tissue) %>%
+  summarise(n = n(), 
+            max_log2tpm = max(Log2TPM), 
+            min_log2tpm = min(Log2TPM),
+            median_log2tpm = median(Log2TPM),
+            mean_log2tpm = mean(Log2TPM), 
+            n_above_0 = sum(Log2TPM > 0)) %>%
+  kable()
+
+
+```
+
+### Number of Unique Overlapping Transcripts with TPM > 0 Per Tissue
+```{r}
+fill <- gtex_tpm_int %>%
+  filter(Log2TPM > 0) %>%
+  mutate(id = group_indices(., gene_id)) %>%
+  select(-TPM, -Description) %>%
+  spread(key = tissue, value = gene_id)
+
+upset(fromList(list(Sigmoid = fill$`Colon - Sigmoid`,
+     Transverse = fill$`Colon - Transverse`,
+     Ileum = fill$`Small Intestine - Terminal Ileum`)),
+     order.by = "freq") 
+```
+
+### List of Unique Transcripts with TPM across Intestinal Tissue
+```{r}
+gtex_tpm_int <- gtex_tpm_int %>%
+  filter(Log2TPM > 0) %>%
+  select(gene_id, Description) %>%
+  distinct(gene_id, .keep_all = TRUE) %>%
+  mutate(gene_id = str_replace(gene_id,"\\..*","")) # remove ensg version https://uswest.ensembl.org/Help/Faq?id=488
+
+gtex_tpm_int
+```
+
+## Single Cell
+Data broken down from a variety of sources.
+- Atlas (droplet)	7216 cells	3'-droplet, from 6 mice (data in Broad Portal)
+- Atlas (plate)	1522 cells	Full-length plateunknown, number of mice (data in GEO)
+- Spatial regions	11665 cells	3'-droplet, from 2 mice (data in Broad Portal)
+
+### Single Cell Broad Portal
+```{bash, eval = FALSE}
+curl "https://portals.broadinstitute.org/single_cell/bulk_data/small-intestinal-epithelium/all/191380" -o cfg.txt; curl -K cfg.txt
+```
+
+```{bash, eval = FALSE}
+gunzip data/regional_cell_sampling_Log2TPM.txt.gz
+```
+
+### Atlas droplet all regions
+```{r}
+drop_total <- read_tsv("data/atlas_Log2Tpm_round2.txt")
+metadata <- read_tsv("data/atlas_metadata.txt")
+drop_total <- drop_total %>%
+  gather(key = "cell_name", value = "Log2TPM", -GENE)
+
+# meta data exists for all cells
+table(unique(drop_total$cell_name) %in% metadata$NAME)
+
+drop_total <- drop_total %>%
+  left_join(., metadata, by = c("cell_name" = "NAME")) %>%
+  select(-Region, -Condition)
+
+drop_total %>%
+  group_by(Cluster) %>%
+  summarise(n_cells = length(unique(cell_name))) %>%
+  arrange(desc(n_cells)) %>%
+  mutate(Cluster = factor(Cluster, levels = rev(unique(Cluster)))) %>%
+  ggplot(aes(x = Cluster, y = n_cells)) + 
+  geom_col() +
+  geom_text(aes(label = n_cells, y = n_cells + 1), vjust = 0) +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Number of Cells Analysed by Droplet (all regions) \n Per Defined Cluster Type")
+  
+```
+
+```{r}
+drop_total %>%
+  group_by(Cluster, GENE) %>%
+  summarise(median_log2_tpm = median(Log2TPM)) %>%
+  group_by(Cluster) %>%
+  summarise(n = n(),
+            max_log2tpm = max(median_log2_tpm), 
+            min_log2tpm = min(median_log2_tpm),
+            median_log2tpm = median(median_log2_tpm),
+            mean_log2tpm = mean(median_log2_tpm), 
+            n_above_0 = sum(median_log2_tpm > 0)) %>%
+  kable()
+```
+
+### Number of Unique Overlapping Transcripts with Median TPM > 0 Per Mouse Epithelial Cell Type
+```{r}
+fill <- drop_total %>%
+  group_by(Cluster, GENE) %>%
+  summarise(median_log2_tpm = median(Log2TPM)) %>%
+  filter(median_log2_tpm > 0) %>%
+  ungroup() %>%
+  mutate(id = group_indices(., GENE)) %>%
+  select(-median_log2_tpm) %>%
+  spread(key = Cluster, value = GENE) %>%
+  select(-id)
+
+list <- lapply(colnames(fill), function(x) {
+  fill %>%
+    pull(x) %>%
+    na.omit()
+})
+
+names(list) <- colnames(fill)
+upset(fromList(list),
+     order.by = "freq",
+     nsets = 15) 
+```
+
+```{r}
+drop_total %>%
+  group_by(Cluster, GENE) %>%
+  summarise(median_log2_tpm = median(Log2TPM)) %>%
+  ungroup() %>%
+  filter(median_log2_tpm > 0) %>%
+  select(GENE) %>%
+  distinct()
+```
+
+### Atlas droplet sub regions
+```{r}
+drop_regions <- read_tsv("data/regional_cell_sampling_Log2TPM.txt")
+drop_regions <- drop_regions %>%
+  gather(key = "cell_name", value = "Log2TPM", -GENE) 
+
+drop_region_cells <- drop_regions %>%
+  select(cell_name) %>%
+  distinct() %>%
+  separate(cell_name, into = c("barcode", "Region", "Mouse", "Cluster"), by = "_", remove = FALSE) %>%
+  select(-barcode, -Mouse)
+
+# NOT ALL meta data exists for all cells
+table(unique(drop_region_cells$cell_name) %in% metadata$NAME)
+
+table(metadata$Region)
+table(drop_region_cells$Region)
+
+# There is a "small" error in that the region specified in the metadata file
+# is flipped for Jejunum and Duodenum samples when compared to the raw name file
+# i am not sure which is correct, and for my purposes it doesn't really matter
+# but it might be worth clarrifying 
+
+drop_regions %>%
+  select(-GENE) %>%
+  left_join(., drop_region_cells, by = "cell_name") %>%
+  group_by(Region, Cluster) %>%
+  summarise(n_cells = length(unique(cell_name))) %>%
+  arrange(desc(n_cells)) %>%
+  mutate(Cluster = factor(Cluster, levels = rev(unique(Cluster)))) %>%
+  ggplot(aes(x = Cluster, y = n_cells)) + 
+  geom_col() +
+  theme_minimal() +
+  coord_flip() +
+  facet_wrap(~Region) +
+  labs(title = "Number of Cells Analysed by Droplet (all regions) \n Per Defined Cluster Type")
+```
+
+```{r}
+drop_regions %>%
+  left_join(., drop_region_cells, by = "cell_name") %>%
+  group_by(Region, Cluster, GENE) %>%
+  summarise(median_log2_tpm = median(Log2TPM)) %>%
+  group_by(Region, Cluster)s %>%
+  summarise(n = n(),
+            max_log2tpm = max(median_log2_tpm), 
+            min_log2tpm = min(median_log2_tpm),
+            median_log2tpm = median(median_log2_tpm),
+            mean_log2tpm = mean(median_log2_tpm), 
+            n_above_0 = sum(median_log2_tpm > 0)) %>%
+  kable()
+```
+
+### Number of Unique Overlapping Transcripts with Median TPM > 0 Per Mouse Epithelial Cell Type
+```{r}
+
+upset_per_region <- function(region){
+  fill <- drop_region_cells %>%
+    filter(Region == region) %>%
+    left_join(., drop_regions, by = "cell_name") %>%
+    group_by(Cluster, GENE) %>%
+    summarise(median_log2_tpm = median(Log2TPM)) %>%
+    filter(median_log2_tpm > 0) %>%
+    ungroup() %>%
+    mutate(id = group_indices(., GENE)) %>%
+    select(-median_log2_tpm) %>%
+    spread(key = Cluster, value = GENE) %>%
+    select(-id)
+  
+  list <- lapply(colnames(fill), function(x) {
+  fill %>%
+    pull(x) %>%
+    na.omit()
+    })
+  
+  names(list) <- colnames(fill)
+  upset(fromList(list),
+     order.by = "freq",
+     nsets = 15)
+  
+}
+
+lapply(unique(drop_region_cells$Region), upset_per_region)
+```
+
+```{r}
+drop_regions %>%
+  left_join(., drop_region_cells, by = "cell_name") %>%
+  group_by(Region, Cluster, GENE) %>%
+  summarise(median_log2_tpm = median(Log2TPM)) %>%
+  ungroup() %>%
+  filter(median_log2_tpm > 0) %>%
+  select(GENE) %>%
+  distinct()
+```
+
+### Get Data Single Cell Plate Full Length
+```{bash, eval = FALSE}
+wget -O data/GSE92332_AtlasFullLength_TPM.txt.gz  ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE92nnn/GSE92332/suppl/GSE92332_AtlasFullLength_TPM.txt.gz
+
+gunzip data/GSE92332_AtlasFullLength_TPM.txt.gz 
+```
+
+### Atlas full length
+```{r}
+full_length <- read_tsv("data/GSE92332_AtlasFullLength_TPM.txt", skip = 1, col_names = FALSE)
+full_length_names <- read_tsv("data/GSE92332_AtlasFullLength_TPM.txt", n_max = 1, col_names = FALSE)
+full_length_names <- full_length_names %>%
+  mutate(gene_name = "GENE") %>%
+  select(gene_name, everything()) %>%
+  gather(key = "column", value = "name")
+colnames(full_length) <- full_length_names$name
+
+full_length <- full_length %>%
+  gather(key = "cell_name", value = "Log2TPM", -GENE) 
+
+full_length <- full_length %>%
+  separate(cell_name, into = c("p1","p2","p3", "Cluster"), sep = "_", remove = FALSE) %>%
+  select(-p1, -p2, -p3)
+
+full_length %>%
+  select(-GENE) %>%
+  group_by(Cluster) %>%
+  summarise(n_cells = length(unique(cell_name))) %>%
+  arrange(desc(n_cells)) %>%
+  mutate(Cluster = factor(Cluster, levels = rev(unique(Cluster)))) %>%
+  ggplot(aes(x = Cluster, y = n_cells)) + 
+  geom_col() +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Number of Cells Analysed by Full Length (all regions) \n Per Defined Cluster Type")
+```
+
+```{r}
+full_length %>%
+  group_by(Cluster, GENE) %>%
+  summarise(median_log2_tpm = median(Log2TPM)) %>%
+  group_by(Cluster) %>%
+  summarise(n = n(),
+            max_log2tpm = max(median_log2_tpm), 
+            min_log2tpm = min(median_log2_tpm),
+            median_log2tpm = median(median_log2_tpm),
+            mean_log2tpm = mean(median_log2_tpm), 
+            n_above_0 = sum(median_log2_tpm > 0)) %>%
+  kable()
+```
+```{r}
+fill <- full_length %>%
+  group_by(Cluster, GENE) %>%
+  summarise(median_log2_tpm = median(Log2TPM)) %>%
+  filter(median_log2_tpm > 0) %>%
+  ungroup() %>%
+  mutate(id = group_indices(., GENE)) %>%
+  select(-median_log2_tpm) %>%
+  spread(key = Cluster, value = GENE) %>%
+  select(-id)
+
+list <- lapply(colnames(fill), function(x) {
+  fill %>%
+    pull(x) %>%
+    na.omit()
+})
+
+names(list) <- colnames(fill)
+upset(fromList(list),
+     order.by = "freq",
+     nsets = 15) 
+```
+
+```{r}
+full_length %>%
+  group_by(Cluster, GENE) %>%
+  summarise(median_log2_tpm = median(Log2TPM)) %>%
+  ungroup() %>%
+  filter(median_log2_tpm > 0) %>%
+  select(GENE) %>%
+  distinct()
+```
+
+### Link ENSG to Uniprot
+```{bash, eval = FALSE}
+wget -O data/HUMAN_9606_idmapping.dat.gz ftp://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/by_organism/HUMAN_9606_idmapping.dat.gz
+
+gunzip data/HUMAN_9606_idmapping.dat.gz
+```
+
+```{r}
+uniprot_ids <- read_tsv("data/HUMAN_9606_idmapping.dat", col_names = c("UniProtKB-AC", "ID_type", "ID"))
+uniprot_ids <- uniprot_ids %>%
+  filter(ID_type == "Ensembl")
+
+gtex_tpm_int %>%
+  left_join(., uniprot_ids, by = c("gene_id" = "ID"))
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
